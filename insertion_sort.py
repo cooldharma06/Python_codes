@@ -1,4 +1,4 @@
-## Insertion sort - after long time 
+## Insertion sort - without duplicates
 
 import pdb
 
