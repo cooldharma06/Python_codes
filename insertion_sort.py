@@ -9,13 +9,18 @@ i = 0
 
 while i < len(l)-1:
         pop_value = min(l[i:i+2])
-        l.remove(pop_value)
+      # with duplicates sorting
+        index = l[i:i+2].index(pop_value)
+        l.pop(i+index)
+        
         print "minimum value.. ",pop_value
         # traverse and keep the element ele < x < ele1
         j = 0
         while j < len(l[:i+1]):
 #            pdb.set_trace()
-            if (l[j] >= pop_value):
+#       To remove duplicates: l[j] == pop_value means break the loop and do nothing 
+#       so element will not be insert in the list
+            if (l[j] >= pop_value or l[j] == pop_value ):
               l.insert(j,pop_value)
               break
             elif (l[j] <= pop_value and pop_value <= l[j+1] ):
