@@ -1,0 +1,172 @@
+
+diff --git a/zun/api/controllers/v1/containers.py b/zun/api/controllers/v1/containers.py
+index 603ae12..a96bd83 100644
+--- a/zun/api/controllers/v1/containers.py
++++ b/zun/api/controllers/v1/containers.py
+@@ -242,12 +242,14 @@ class ContainersController(base.Controller):
+         if container_dict.get('image_driver'):
+             container_dict['image_driver'] = api_utils.string_or_none(
+                 container_dict.get('image_driver'))
++        LOG.debug(" ########### dharma data is container_dict data (%s)"%container_dict)
+
+         # NOTE(mkrai): Intent here is to check the existence of image
+         # before proceeding to create container. If image is not found,
+         # container create will fail with 400 status.
+         images = compute_api.image_search(context, container_dict['image'],
+                                           container_dict.get('image_driver'),
++                                          container_dict.get('glance_image_tag'),
+                                           True)
+         if not images:
+             raise exception.ImageNotFound(image=container_dict['image'])
+@@ -284,6 +286,7 @@ class ContainersController(base.Controller):
+         container_dict['status'] = consts.CREATING
+         extra_spec = container_dict.get('hints', None)
+         new_container = objects.Container(context, **container_dict)
++        LOG.debug("@@@@@@@@@@ dharma data new_container(%s).. context(%s)..  container_dict(%s) is.."%(new_container, context, container_dict))
+         new_container.create(context)
+
+         if run:
+diff --git a/zun/api/controllers/v1/schemas/containers.py b/zun/api/controllers/v1/schemas/containers.py
+index 7761ece..eedaa67 100644
+--- a/zun/api/controllers/v1/schemas/containers.py
++++ b/zun/api/controllers/v1/schemas/containers.py
+@@ -28,6 +28,7 @@ _container_properties = {
+     'restart_policy': parameter_types.restart_policy,
+     'interactive': parameter_types.boolean,
+     'image_driver': parameter_types.image_driver,
++    'glance_image_tag': parameter_types.glance_image_tag,
+     'security_groups': parameter_types.security_groups,
+     'hints': parameter_types.hints,
+     'nets': parameter_types.nets
+diff --git a/zun/common/validation/parameter_types.py b/zun/common/validation/parameter_types.py
+index c8fa556..32d0430 100644
+--- a/zun/common/validation/parameter_types.py
++++ b/zun/common/validation/parameter_types.py
+@@ -49,6 +49,13 @@ image_driver = {
+     'enum': image_driver_list_with_none
+ }
+
++glance_image_tag = {
++     'type': 'string',
++     'minLength': 2,
++     'maxLength': 255,
++     'pattern': '[a-zA-Z0-9][a-zA-Z0-9_.-]+$'
++}
++
+ container_name = {
+     'type': ['string', 'null'],
+     'minLength': 2,
+diff --git a/zun/compute/api.py b/zun/compute/api.py
+index fd0d6ad..041b3dc 100644
+--- a/zun/compute/api.py
++++ b/zun/compute/api.py
+@@ -130,8 +130,8 @@ class API(object):
+     def image_pull(self, context, image):
+         return self.rpcapi.image_pull(context, image)
+
+-    def image_search(self, context, image, image_driver, *args):
+-        return self.rpcapi.image_search(context, image, image_driver, *args)
++    def image_search(self, context, image, image_driver, glance_image_tag, *args):
++        return self.rpcapi.image_search(context, image, image_driver, glance_image_tag, *args)
+
+     def capsule_create(self, context, new_capsule,
+                        requested_networks=None, extra_spec=None):
+diff --git a/zun/compute/manager.py b/zun/compute/manager.py
+index d9350a5..b802b25 100644
+--- a/zun/compute/manager.py
++++ b/zun/compute/manager.py
+@@ -57,6 +57,7 @@ class Manager(periodic_task.PeriodicTasks):
+         container.save(context)
+
+     def container_create(self, context, limits, requested_networks, container):
++        LOG.debug("**************** data is container(%s)"%container)
+         utils.spawn_n(self._do_container_create, context, container,
+                       requested_networks, limits)
+
+@@ -91,7 +92,12 @@ class Manager(periodic_task.PeriodicTasks):
+     def _do_container_create_base(self, context, container, requested_networks,
+                                   sandbox=None, limits=None, reraise=False):
+         self._update_task_state(context, container, consts.IMAGE_PULLING)
+-        repo, tag = utils.parse_image_name(container.image)
++
++        LOG.debug("@@@@@@@@ dharma data is container(%s)"%container)
++
++        repo, tag  = container.image, container.glance_image_tag
++
++        #repo, tag = utils.parse_image_name(container.image)
+         image_pull_policy = utils.get_image_pull_policy(
+             container.image_pull_policy, tag)
+         image_driver_name = container.image_driver
+@@ -644,11 +650,12 @@ class Manager(periodic_task.PeriodicTasks):
+             raise
+
+     @translate_exception
+-    def image_search(self, context, image, image_driver_name, exact_match):
++    def image_search(self, context, image, image_driver_name, glance_image_tag, exact_match):
+         LOG.debug('Searching image...', image=image)
++        LOG.debug('$$$$$$$$$$$$$$$$ dharma data is... context(%s), image(%s), image_driver_name(%s) glance_image_tag(%s)'%(context, image, image_driver_name, glance_image_tag))
+         try:
+             return image_driver.search_image(context, image,
+-                                             image_driver_name, exact_match)
++                                             image_driver_name, glance_image_tag, exact_match)
+         except Exception as e:
+             LOG.exception("Unexpected exception while searching image: %s",
+                           six.text_type(e))
+diff --git a/zun/compute/rpcapi.py b/zun/compute/rpcapi.py
+index a4b272b..c6f63e5 100644
+--- a/zun/compute/rpcapi.py
++++ b/zun/compute/rpcapi.py
+@@ -166,13 +166,14 @@ class API(rpc_service.API):
+         host = None
+         self._cast(host, 'image_pull', image=image)
+
+-    def image_search(self, context, image, image_driver, exact_match):
++    def image_search(self, context, image, image_driver, glance_image_tag, exact_match):
+         # NOTE(hongbin): Image API doesn't support multiple compute nodes
+         # scenario yet, so we temporarily set host to None and rpc will
+         # choose an arbitrary host.
+         host = None
+         return self._call(host, 'image_search', image=image,
+                           image_driver_name=image_driver,
++                          glance_image_tag=glance_image_tag,
+                           exact_match=exact_match)
+
+     def capsule_create(self, context, host, capsule,
+diff --git a/zun/image/driver.py b/zun/image/driver.py
+index 308cabc..2a34d97 100644
+--- a/zun/image/driver.py
++++ b/zun/image/driver.py
+@@ -60,6 +60,7 @@ def load_image_driver(image_driver=None):
+
+ def pull_image(context, repo, tag, image_pull_policy='always',
+                image_driver=None):
++    LOG.debug('^^^^^^^^ dharma data from driver context(%s).. repo(%s).. tag(%s)..'%(context, repo, tag))
+     if image_driver:
+         image_driver_list = [image_driver.lower()]
+     else:
+@@ -84,9 +85,11 @@ def pull_image(context, repo, tag, image_pull_policy='always',
+     return image, image_loaded
+
+
+-def search_image(context, image_name, image_driver, exact_match):
++def search_image(context, image_name, image_driver, glance_image_tag, exact_match):
+     images = []
+-    repo, tag = parse_image_name(image_name)
++    repo = image_name
++#   repo, tag = parse_image_name(image_name)
++    tag = glance_image_tag
+     if image_driver:
+         image_driver_list = [image_driver.lower()]
+     else:
+diff --git a/zun/objects/container.py b/zun/objects/container.py
+index eaa9c7f..298fcc8 100644
+--- a/zun/objects/container.py
++++ b/zun/objects/container.py
+@@ -68,6 +68,7 @@ class Container(base.ZunPersistentObject, base.ZunObject):
+         'status_detail': fields.StringField(nullable=True),
+         'interactive': fields.BooleanField(nullable=True),
+         'image_driver': fields.StringField(nullable=True),
++#        'glance_image_tag': fields.StringField(nullable=True),
+         'websocket_url': fields.StringField(nullable=True),
+         'websocket_token': fields.StringField(nullable=True),
+         'security_groups': fields.ListOfStringsField(nullable=True),
