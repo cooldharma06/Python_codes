@@ -35,11 +35,19 @@ def find_image(image_ident, image_tag):
     matches = find_images(image_ident, exact_match=True)
 #    print('Found matches %s ', len(matches))
     match = []
-
     for i in range(len(matches)):
-#       print('%s......%s.., .%s...%d..'%(image_tag, matches[i]['tags'],type(matches[i]['tags']),i))
+#    for i in matches:
+       print(i)
+       print('%s......%s.., .%s...%d..'%(image_tag, matches[i]['tags'],type(matches[i]['tags']),i))
+
+
        if matches[i]['tags']:
-           if image_tag == encodeutils.safe_decode(matches[i]['tags'][0]):
+           if len(image_tag) < len(matches[i]['tags']):
+               data1, data2 = image_tag, matches[i]['tags']
+           else:
+               data1, data2 = matches[i]['tags'], image_tag
+           if all(map(lambda x: x in data1, data2)):
+         # if image_tag == encodeutils.safe_decode(matches[i]['tags'][0]):
                match.append(matches[i])
        else:
            match.append(matches[i])
@@ -53,7 +61,6 @@ def find_image(image_ident, image_tag):
                "instead.") % {'image_ident': image_ident}
         print(msg)
         #raise exception.Conflict(msg)
-
 
 def find_images(image_ident, exact_match):
 #    glance = create_glanceclient(context)
