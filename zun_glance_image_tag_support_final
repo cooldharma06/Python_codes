@@ -1,0 +1,679 @@
+root@dharma:/opt/stack/zun# clear
+root@dharma:/opt/stack/zun# cat ~/diff.txt
+diff --git a/diff.txt b/diff.txt
+new file mode 100644
+index 0000000..9eaef9d
+--- /dev/null
++++ b/diff.txt
+@@ -0,0 +1,335 @@
++diff --git a/diff.txt b/diff.txt
++new file mode 100644
++index 0000000..e9202e7
++--- /dev/null
+++++ b/diff.txt
++@@ -0,0 +1,133 @@
+++diff --git a/zun/api/controllers/v1/containers.py b/zun/api/controllers/v1/containers.py
+++index 603ae12..cc68d78 100644
+++--- a/zun/api/controllers/v1/containers.py
++++++ b/zun/api/controllers/v1/containers.py
+++@@ -248,6 +248,7 @@ class ContainersController(base.Controller):
+++         # container create will fail with 400 status.
+++         images = compute_api.image_search(context, container_dict['image'],
+++                                           container_dict.get('image_driver'),
++++                                          container_dict.get('image_tag'),
+++                                           True)
+++         if not images:
+++             raise exception.ImageNotFound(image=container_dict['image'])
+++diff --git a/zun/api/controllers/v1/schemas/containers.py b/zun/api/controllers/v1/schemas/containers.py
+++index 7761ece..b464e15 100644
+++--- a/zun/api/controllers/v1/schemas/containers.py
++++++ b/zun/api/controllers/v1/schemas/containers.py
+++@@ -28,6 +28,7 @@ _container_properties = {
+++     'restart_policy': parameter_types.restart_policy,
+++     'interactive': parameter_types.boolean,
+++     'image_driver': parameter_types.image_driver,
++++    'image_tag': parameter_types.image_tag,
+++     'security_groups': parameter_types.security_groups,
+++     'hints': parameter_types.hints,
+++     'nets': parameter_types.nets
+++diff --git a/zun/common/validation/parameter_types.py b/zun/common/validation/parameter_types.py
+++index c8fa556..26e2578 100644
+++--- a/zun/common/validation/parameter_types.py
++++++ b/zun/common/validation/parameter_types.py
+++@@ -49,6 +49,13 @@ image_driver = {
+++     'enum': image_driver_list_with_none
+++ }
+++
++++image_tag = {
++++     'type': 'string',
++++     'minLength': 2,
++++     'maxLength': 255,
++++     'pattern': '[a-zA-Z0-9][a-zA-Z0-9_.-]+$'
++++}
++++
+++ container_name = {
+++     'type': ['string', 'null'],
+++     'minLength': 2,
+++diff --git a/zun/compute/api.py b/zun/compute/api.py
+++index fd0d6ad..7dd8ae0 100644
+++--- a/zun/compute/api.py
++++++ b/zun/compute/api.py
+++@@ -130,8 +130,8 @@ class API(object):
+++     def image_pull(self, context, image):
+++         return self.rpcapi.image_pull(context, image)
+++
+++-    def image_search(self, context, image, image_driver, *args):
+++-        return self.rpcapi.image_search(context, image, image_driver, *args)
++++    def image_search(self, context, image, image_driver, image_tag, *args):
++++        return self.rpcapi.image_search(context, image, image_driver, image_tag, *args)
+++
+++     def capsule_create(self, context, new_capsule,
+++                        requested_networks=None, extra_spec=None):
+++diff --git a/zun/compute/manager.py b/zun/compute/manager.py
+++index d9350a5..a6aa1a8 100644
+++--- a/zun/compute/manager.py
++++++ b/zun/compute/manager.py
+++@@ -91,7 +91,8 @@ class Manager(periodic_task.PeriodicTasks):
+++     def _do_container_create_base(self, context, container, requested_networks,
+++                                   sandbox=None, limits=None, reraise=False):
+++         self._update_task_state(context, container, consts.IMAGE_PULLING)
+++-        repo, tag = utils.parse_image_name(container.image)
++++        repo, tag = container.image, container.image_tag
++++        #repo, tag = utils.parse_image_name(container.image)
+++         image_pull_policy = utils.get_image_pull_policy(
+++             container.image_pull_policy, tag)
+++         image_driver_name = container.image_driver
+++@@ -644,11 +645,11 @@ class Manager(periodic_task.PeriodicTasks):
+++             raise
+++
+++     @translate_exception
+++-    def image_search(self, context, image, image_driver_name, exact_match):
++++    def image_search(self, context, image, image_driver_name, image_tag, exact_match):
+++         LOG.debug('Searching image...', image=image)
+++         try:
+++             return image_driver.search_image(context, image,
+++-                                             image_driver_name, exact_match)
++++                                             image_driver_name, image_tag, exact_match)
+++         except Exception as e:
+++             LOG.exception("Unexpected exception while searching image: %s",
+++                           six.text_type(e))
+++diff --git a/zun/compute/rpcapi.py b/zun/compute/rpcapi.py
+++index a4b272b..81dfacf 100644
+++--- a/zun/compute/rpcapi.py
++++++ b/zun/compute/rpcapi.py
+++@@ -166,13 +166,14 @@ class API(rpc_service.API):
+++         host = None
+++         self._cast(host, 'image_pull', image=image)
+++
+++-    def image_search(self, context, image, image_driver, exact_match):
++++    def image_search(self, context, image, image_driver, image_tag, exact_match):
+++         # NOTE(hongbin): Image API doesn't support multiple compute nodes
+++         # scenario yet, so we temporarily set host to None and rpc will
+++         # choose an arbitrary host.
+++         host = None
+++         return self._call(host, 'image_search', image=image,
+++                           image_driver_name=image_driver,
++++                          image_tag=image_tag,
+++                           exact_match=exact_match)
+++
+++     def capsule_create(self, context, host, capsule,
+++diff --git a/zun/image/driver.py b/zun/image/driver.py
+++index 308cabc..a8ea757 100644
+++--- a/zun/image/driver.py
++++++ b/zun/image/driver.py
+++@@ -84,9 +84,9 @@ def pull_image(context, repo, tag, image_pull_policy='always',
+++     return image, image_loaded
+++
+++
+++-def search_image(context, image_name, image_driver, exact_match):
++++def search_image(context, image_name, image_driver, image_tag, exact_match):
+++     images = []
+++-    repo, tag = parse_image_name(image_name)
++++    repo, tag = image_name, image_tag
+++     if image_driver:
+++         image_driver_list = [image_driver.lower()]
+++     else:
+++diff --git a/zun/objects/container.py b/zun/objects/container.py
+++index eaa9c7f..3f2ab01 100644
+++--- a/zun/objects/container.py
++++++ b/zun/objects/container.py
+++@@ -68,6 +68,7 @@ class Container(base.ZunPersistentObject, base.ZunObject):
+++         'status_detail': fields.StringField(nullable=True),
+++         'interactive': fields.BooleanField(nullable=True),
+++         'image_driver': fields.StringField(nullable=True),
++++        'image_tag': fields.StringField(nullable=True),
+++         'websocket_url': fields.StringField(nullable=True),
+++         'websocket_token': fields.StringField(nullable=True),
+++         'security_groups': fields.ListOfStringsField(nullable=True),
++diff --git a/zun/api/controllers/v1/containers.py b/zun/api/controllers/v1/containers.py
++index 603ae12..cc68d78 100644
++--- a/zun/api/controllers/v1/containers.py
+++++ b/zun/api/controllers/v1/containers.py
++@@ -248,6 +248,7 @@ class ContainersController(base.Controller):
++         # container create will fail with 400 status.
++         images = compute_api.image_search(context, container_dict['image'],
++                                           container_dict.get('image_driver'),
+++                                          container_dict.get('image_tag'),
++                                           True)
++         if not images:
++             raise exception.ImageNotFound(image=container_dict['image'])
++diff --git a/zun/api/controllers/v1/schemas/containers.py b/zun/api/controllers/v1/schemas/containers.py
++index 7761ece..b464e15 100644
++--- a/zun/api/controllers/v1/schemas/containers.py
+++++ b/zun/api/controllers/v1/schemas/containers.py
++@@ -28,6 +28,7 @@ _container_properties = {
++     'restart_policy': parameter_types.restart_policy,
++     'interactive': parameter_types.boolean,
++     'image_driver': parameter_types.image_driver,
+++    'image_tag': parameter_types.image_tag,
++     'security_groups': parameter_types.security_groups,
++     'hints': parameter_types.hints,
++     'nets': parameter_types.nets
++diff --git a/zun/api/controllers/v1/views/containers_view.py b/zun/api/controllers/v1/views/containers_view.py
++index e8bb954..f87e3a7 100644
++--- a/zun/api/controllers/v1/views/containers_view.py
+++++ b/zun/api/controllers/v1/views/containers_view.py
++@@ -38,6 +38,7 @@ _basic_keys = (
++     'status_detail',
++     'interactive',
++     'image_driver',
+++    'image_tag',
++     'security_groups',
++     'auto_remove',
++ )
++diff --git a/zun/common/validation/parameter_types.py b/zun/common/validation/parameter_types.py
++index c8fa556..26e2578 100644
++--- a/zun/common/validation/parameter_types.py
+++++ b/zun/common/validation/parameter_types.py
++@@ -49,6 +49,13 @@ image_driver = {
++     'enum': image_driver_list_with_none
++ }
++
+++image_tag = {
+++     'type': 'string',
+++     'minLength': 2,
+++     'maxLength': 255,
+++     'pattern': '[a-zA-Z0-9][a-zA-Z0-9_.-]+$'
+++}
+++
++ container_name = {
++     'type': ['string', 'null'],
++     'minLength': 2,
++diff --git a/zun/compute/api.py b/zun/compute/api.py
++index fd0d6ad..7dd8ae0 100644
++--- a/zun/compute/api.py
+++++ b/zun/compute/api.py
++@@ -130,8 +130,8 @@ class API(object):
++     def image_pull(self, context, image):
++         return self.rpcapi.image_pull(context, image)
++
++-    def image_search(self, context, image, image_driver, *args):
++-        return self.rpcapi.image_search(context, image, image_driver, *args)
+++    def image_search(self, context, image, image_driver, image_tag, *args):
+++        return self.rpcapi.image_search(context, image, image_driver, image_tag, *args)
++
++     def capsule_create(self, context, new_capsule,
++                        requested_networks=None, extra_spec=None):
++diff --git a/zun/compute/manager.py b/zun/compute/manager.py
++index d9350a5..a6aa1a8 100644
++--- a/zun/compute/manager.py
+++++ b/zun/compute/manager.py
++@@ -91,7 +91,8 @@ class Manager(periodic_task.PeriodicTasks):
++     def _do_container_create_base(self, context, container, requested_networks,
++                                   sandbox=None, limits=None, reraise=False):
++         self._update_task_state(context, container, consts.IMAGE_PULLING)
++-        repo, tag = utils.parse_image_name(container.image)
+++        repo, tag = container.image, container.image_tag
+++        #repo, tag = utils.parse_image_name(container.image)
++         image_pull_policy = utils.get_image_pull_policy(
++             container.image_pull_policy, tag)
++         image_driver_name = container.image_driver
++@@ -644,11 +645,11 @@ class Manager(periodic_task.PeriodicTasks):
++             raise
++
++     @translate_exception
++-    def image_search(self, context, image, image_driver_name, exact_match):
+++    def image_search(self, context, image, image_driver_name, image_tag, exact_match):
++         LOG.debug('Searching image...', image=image)
++         try:
++             return image_driver.search_image(context, image,
++-                                             image_driver_name, exact_match)
+++                                             image_driver_name, image_tag, exact_match)
++         except Exception as e:
++             LOG.exception("Unexpected exception while searching image: %s",
++                           six.text_type(e))
++diff --git a/zun/compute/rpcapi.py b/zun/compute/rpcapi.py
++index a4b272b..81dfacf 100644
++--- a/zun/compute/rpcapi.py
+++++ b/zun/compute/rpcapi.py
++@@ -166,13 +166,14 @@ class API(rpc_service.API):
++         host = None
++         self._cast(host, 'image_pull', image=image)
++
++-    def image_search(self, context, image, image_driver, exact_match):
+++    def image_search(self, context, image, image_driver, image_tag, exact_match):
++         # NOTE(hongbin): Image API doesn't support multiple compute nodes
++         # scenario yet, so we temporarily set host to None and rpc will
++         # choose an arbitrary host.
++         host = None
++         return self._call(host, 'image_search', image=image,
++                           image_driver_name=image_driver,
+++                          image_tag=image_tag,
++                           exact_match=exact_match)
++
++     def capsule_create(self, context, host, capsule,
++diff --git a/zun/db/sqlalchemy/alembic/versions/20450295927a_add_image_tag_to_container.py b/zun/db/sqlalchemy/alembic/versions/20450295927a_add_image_tag_to_container.py
++new file mode 100644
++index 0000000..2deeda6
++--- /dev/null
+++++ b/zun/db/sqlalchemy/alembic/versions/20450295927a_add_image_tag_to_container.py
++@@ -0,0 +1,22 @@
+++"""Add image_tag to container
+++
+++Revision ID: 20450295927a
+++Revises: a251f1f61217
+++Create Date: 2017-08-22 13:23:56.181499
+++
+++"""
+++
+++# revision identifiers, used by Alembic.
+++revision = '20450295927a'
+++down_revision = 'a251f1f61217'
+++branch_labels = None
+++depends_on = None
+++
+++from alembic import op
+++import sqlalchemy as sa
+++
+++
+++def upgrade():
+++    op.add_column('container',
+++              sa.Column('image_tag', sa.String(length=255),
+++                        nullable=True))
++diff --git a/zun/db/sqlalchemy/models.py b/zun/db/sqlalchemy/models.py
++index b28c9ff..43fcf6d 100644
++--- a/zun/db/sqlalchemy/models.py
+++++ b/zun/db/sqlalchemy/models.py
++@@ -155,7 +155,7 @@ class Container(Base):
++     websocket_token = Column(String(255))
++     security_groups = Column(JSONEncodedList)
++     auto_remove = Column(Boolean, default=False)
++-
+++    image_tag = Column(String(255))
++
++ class Image(Base):
++     """Represents an image. """
++diff --git a/zun/image/driver.py b/zun/image/driver.py
++index 308cabc..a8ea757 100644
++--- a/zun/image/driver.py
+++++ b/zun/image/driver.py
++@@ -84,9 +84,9 @@ def pull_image(context, repo, tag, image_pull_policy='always',
++     return image, image_loaded
++
++
++-def search_image(context, image_name, image_driver, exact_match):
+++def search_image(context, image_name, image_driver, image_tag, exact_match):
++     images = []
++-    repo, tag = parse_image_name(image_name)
+++    repo, tag = image_name, image_tag
++     if image_driver:
++         image_driver_list = [image_driver.lower()]
++     else:
++diff --git a/zun/objects/container.py b/zun/objects/container.py
++index eaa9c7f..5b3b3b4 100644
++--- a/zun/objects/container.py
+++++ b/zun/objects/container.py
++@@ -38,7 +38,8 @@ class Container(base.ZunPersistentObject, base.ZunObject):
++     # Version 1.16: Add websocket_url and token
++     # Version 1.17: Add security_groups
++     # Version 1.18: Add auto_remove
++-    VERSION = '1.18'
+++    # Version 1.19: Add image_tag
+++    VERSION = '1.19'
++
++     fields = {
++         'id': fields.IntegerField(),
++@@ -68,6 +69,7 @@ class Container(base.ZunPersistentObject, base.ZunObject):
++         'status_detail': fields.StringField(nullable=True),
++         'interactive': fields.BooleanField(nullable=True),
++         'image_driver': fields.StringField(nullable=True),
+++        'image_tag': fields.StringField(nullable=True),
++         'websocket_url': fields.StringField(nullable=True),
++         'websocket_token': fields.StringField(nullable=True),
++         'security_groups': fields.ListOfStringsField(nullable=True),
+diff --git a/zun/api/controllers/v1/containers.py b/zun/api/controllers/v1/containers.py
+index 603ae12..34f073d 100644
+--- a/zun/api/controllers/v1/containers.py
++++ b/zun/api/controllers/v1/containers.py
+@@ -243,11 +243,14 @@ class ContainersController(base.Controller):
+             container_dict['image_driver'] = api_utils.string_or_none(
+                 container_dict.get('image_driver'))
+
++        LOG.debug(" ######### dharma container_dict is (%s)"%container_dict)
++
+         # NOTE(mkrai): Intent here is to check the existence of image
+         # before proceeding to create container. If image is not found,
+         # container create will fail with 400 status.
+         images = compute_api.image_search(context, container_dict['image'],
+                                           container_dict.get('image_driver'),
++                                          container_dict.get('image_tag',[]),
+                                           True)
+         if not images:
+             raise exception.ImageNotFound(image=container_dict['image'])
+@@ -284,6 +287,8 @@ class ContainersController(base.Controller):
+         container_dict['status'] = consts.CREATING
+         extra_spec = container_dict.get('hints', None)
+         new_container = objects.Container(context, **container_dict)
++
++        LOG.debug("######## dharma new_container create data is... new_container(%s).. context(%s).."%(new_container,context))
+         new_container.create(context)
+
+         if run:
+diff --git a/zun/api/controllers/v1/schemas/containers.py b/zun/api/controllers/v1/schemas/containers.py
+index 7761ece..b464e15 100644
+--- a/zun/api/controllers/v1/schemas/containers.py
++++ b/zun/api/controllers/v1/schemas/containers.py
+@@ -28,6 +28,7 @@ _container_properties = {
+     'restart_policy': parameter_types.restart_policy,
+     'interactive': parameter_types.boolean,
+     'image_driver': parameter_types.image_driver,
++    'image_tag': parameter_types.image_tag,
+     'security_groups': parameter_types.security_groups,
+     'hints': parameter_types.hints,
+     'nets': parameter_types.nets
+diff --git a/zun/api/controllers/v1/views/containers_view.py b/zun/api/controllers/v1/views/containers_view.py
+index e8bb954..f87e3a7 100644
+--- a/zun/api/controllers/v1/views/containers_view.py
++++ b/zun/api/controllers/v1/views/containers_view.py
+@@ -38,6 +38,7 @@ _basic_keys = (
+     'status_detail',
+     'interactive',
+     'image_driver',
++    'image_tag',
+     'security_groups',
+     'auto_remove',
+ )
+diff --git a/zun/common/validation/parameter_types.py b/zun/common/validation/parameter_types.py
+index c8fa556..7c303de 100644
+--- a/zun/common/validation/parameter_types.py
++++ b/zun/common/validation/parameter_types.py
+@@ -49,6 +49,10 @@ image_driver = {
+     'enum': image_driver_list_with_none
+ }
+
++image_tag = {
++     'type': ['array', 'null']
++}
++
+ container_name = {
+     'type': ['string', 'null'],
+     'minLength': 2,
+diff --git a/zun/compute/api.py b/zun/compute/api.py
+index fd0d6ad..7dd8ae0 100644
+--- a/zun/compute/api.py
++++ b/zun/compute/api.py
+@@ -130,8 +130,8 @@ class API(object):
+     def image_pull(self, context, image):
+         return self.rpcapi.image_pull(context, image)
+
+-    def image_search(self, context, image, image_driver, *args):
+-        return self.rpcapi.image_search(context, image, image_driver, *args)
++    def image_search(self, context, image, image_driver, image_tag, *args):
++        return self.rpcapi.image_search(context, image, image_driver, image_tag, *args)
+
+     def capsule_create(self, context, new_capsule,
+                        requested_networks=None, extra_spec=None):
+diff --git a/zun/compute/manager.py b/zun/compute/manager.py
+index d9350a5..a6aa1a8 100644
+--- a/zun/compute/manager.py
++++ b/zun/compute/manager.py
+@@ -91,7 +91,8 @@ class Manager(periodic_task.PeriodicTasks):
+     def _do_container_create_base(self, context, container, requested_networks,
+                                   sandbox=None, limits=None, reraise=False):
+         self._update_task_state(context, container, consts.IMAGE_PULLING)
+-        repo, tag = utils.parse_image_name(container.image)
++        repo, tag = container.image, container.image_tag
++        #repo, tag = utils.parse_image_name(container.image)
+         image_pull_policy = utils.get_image_pull_policy(
+             container.image_pull_policy, tag)
+         image_driver_name = container.image_driver
+@@ -644,11 +645,11 @@ class Manager(periodic_task.PeriodicTasks):
+             raise
+
+     @translate_exception
+-    def image_search(self, context, image, image_driver_name, exact_match):
++    def image_search(self, context, image, image_driver_name, image_tag, exact_match):
+         LOG.debug('Searching image...', image=image)
+         try:
+             return image_driver.search_image(context, image,
+-                                             image_driver_name, exact_match)
++                                             image_driver_name, image_tag, exact_match)
+         except Exception as e:
+             LOG.exception("Unexpected exception while searching image: %s",
+                           six.text_type(e))
+diff --git a/zun/compute/rpcapi.py b/zun/compute/rpcapi.py
+index a4b272b..81dfacf 100644
+--- a/zun/compute/rpcapi.py
++++ b/zun/compute/rpcapi.py
+@@ -166,13 +166,14 @@ class API(rpc_service.API):
+         host = None
+         self._cast(host, 'image_pull', image=image)
+
+-    def image_search(self, context, image, image_driver, exact_match):
++    def image_search(self, context, image, image_driver, image_tag, exact_match):
+         # NOTE(hongbin): Image API doesn't support multiple compute nodes
+         # scenario yet, so we temporarily set host to None and rpc will
+         # choose an arbitrary host.
+         host = None
+         return self._call(host, 'image_search', image=image,
+                           image_driver_name=image_driver,
++                          image_tag=image_tag,
+                           exact_match=exact_match)
+
+     def capsule_create(self, context, host, capsule,
+diff --git a/zun/db/sqlalchemy/alembic/versions/20450295927a_add_image_tag_to_container.py b/zun/db/sqlalchemy/alembic/versions/20450295927a_add_image_tag_to_container.py
+new file mode 100644
+index 0000000..616de5a
+--- /dev/null
++++ b/zun/db/sqlalchemy/alembic/versions/20450295927a_add_image_tag_to_container.py
+@@ -0,0 +1,23 @@
++"""Add image_tag to container
++
++Revision ID: 20450295927a
++Revises: a251f1f61217
++Create Date: 2017-08-22 13:23:56.181499
++
++"""
++
++# revision identifiers, used by Alembic.
++revision = '20450295927a'
++down_revision = 'a251f1f61217'
++branch_labels = None
++depends_on = None
++
++from alembic import op
++import sqlalchemy as sa
++
++
++def upgrade():
++    op.add_column('container',
++                  sa.Column('image_tag',
++                            zun.db.sqlalchemy.models.JSONEncodedList(),
++                            nullable=True))
+diff --git a/zun/db/sqlalchemy/models.py b/zun/db/sqlalchemy/models.py
+index b28c9ff..2788f77 100644
+--- a/zun/db/sqlalchemy/models.py
++++ b/zun/db/sqlalchemy/models.py
+@@ -155,7 +155,7 @@ class Container(Base):
+     websocket_token = Column(String(255))
+     security_groups = Column(JSONEncodedList)
+     auto_remove = Column(Boolean, default=False)
+-
++    image_tag = Column(JSONEncodedList)
+
+ class Image(Base):
+     """Represents an image. """
+diff --git a/zun/image/driver.py b/zun/image/driver.py
+index 308cabc..a8ea757 100644
+--- a/zun/image/driver.py
++++ b/zun/image/driver.py
+@@ -84,9 +84,9 @@ def pull_image(context, repo, tag, image_pull_policy='always',
+     return image, image_loaded
+
+
+-def search_image(context, image_name, image_driver, exact_match):
++def search_image(context, image_name, image_driver, image_tag, exact_match):
+     images = []
+-    repo, tag = parse_image_name(image_name)
++    repo, tag = image_name, image_tag
+     if image_driver:
+         image_driver_list = [image_driver.lower()]
+     else:
+diff --git a/zun/image/glance/driver.py b/zun/image/glance/driver.py
+index bb3245f..1eccbfc 100644
+--- a/zun/image/glance/driver.py
++++ b/zun/image/glance/driver.py
+@@ -35,13 +35,14 @@ class GlanceDriver(driver.ContainerImageDriver):
+     def __init__(self):
+         super(GlanceDriver, self).__init__()
+
+-    def _search_image_on_host(self, context, repo):
+-        LOG.debug('Searching for image %s locally', repo)
++    def _search_image_on_host(self, context, repo, tag):
++        LOG.debug('Searching for image %s:%s locally', repo, tag)
+         images_directory = CONF.glance.images_directory
+         try:
+             # TODO(mkrai): Change this to search image entry in zun db
+             #              after the image endpoint is merged.
+-            image_meta = utils.find_image(context, repo)
++            image_meta = utils.find_image(context, repo, tag)
++            LOG.debug("^^^^^^^^&&&&&&&&&&&& dharma image_meta(%s).."%image_meta)
+         except exception.ImageNotFound:
+             return None
+         if image_meta:
+@@ -59,7 +60,7 @@ class GlanceDriver(driver.ContainerImageDriver):
+         # TODO(shubhams): glance driver does not handle tags
+         #              once metadata is stored in db then handle tags
+         image_loaded = False
+-        image = self._search_image_on_host(context, repo)
++        image = self._search_image_on_host(context, repo, tag)
+         if image:
+             image_path = image['path']
+             image_checksum = image['checksum']
+@@ -88,7 +89,7 @@ class GlanceDriver(driver.ContainerImageDriver):
+
+         LOG.debug('Pulling image from glance %s', repo)
+         try:
+-            image_meta = utils.find_image(context, repo)
++            image_meta = utils.find_image(context, repo, tag)
+             LOG.debug('Image %s was found in glance, downloading now...', repo)
+             image_chunks = utils.download_image_in_chunks(context,
+                                                           image_meta.id)
+diff --git a/zun/image/glance/utils.py b/zun/image/glance/utils.py
+index 4bedde2..9799807 100644
+--- a/zun/image/glance/utils.py
++++ b/zun/image/glance/utils.py
+@@ -14,6 +14,7 @@
+ # limitations under the License.
+
+ from glanceclient.common import exceptions as glance_exceptions
++from oslo_utils import encodeutils
+ from oslo_utils import uuidutils
+
+ from zun.common import clients
+@@ -34,17 +35,60 @@ def create_glanceclient(context):
+     return osc.glance()
+
+
+-def find_image(context, image_ident):
++def find_image(context, image_ident, image_tag):
+     matches = find_images(context, image_ident, exact_match=True)
+     LOG.debug('Found matches %s ', matches)
+-    if len(matches) == 0:
++
++    # added for glance image tag and name support
++    match = []
++    for i in range(len(matches)):
++       if matches[i]['tags']:
++           if len(image_tag) < len(matches[i]['tags']):
++               data1, data2 = image_tag, matches[i]['tags']
++           else:
++               data1, data2 = matches[i]['tags'], image_tag
++           if all(map(lambda x: x in data1, data2)):
++         # if image_tag == encodeutils.safe_decode(matches[i]['tags'][0]):
++               match.append(matches[i])
++       else:
++           match.append(matches[i])
++    if len(match) == 0:
+         raise exception.ImageNotFound(image=image_ident)
+-    if len(matches) > 1:
++    if len(match) > 1:
+         msg = ("Multiple images exist with same name "
+                "%(image_ident)s. Please use the image id "
+                "instead.") % {'image_ident': image_ident}
+         raise exception.Conflict(msg)
+-    return matches[0]
++    return match[0]
++
++#    # added for glance image tag and name support
++#    match = []
++#    for i in range(len(matches)):
++#       if matches[i]['tags']:
++#           if image_tag == encodeutils.safe_decode(matches[i]['tags'][0]):
++#               match.append(matches[i])
++#       else:
++#           match.append(matches[i])
++#    #if len(match) == 1:
++#    #   print(match)
++#    if len(match) == 0:
++#        #print("ImageNotFound")
++#        raise exception.ImageNotFound(image=image_ident)
++#    if len(match) > 1:
++#        msg = ("Multiple images exist with same name "
++#               "%(image_ident)s. Please use the image id "
++#               "instead.") % {'image_ident': image_ident}
++#        raise exception.Conflict(msg)
++#    return match[0]
++#
++#    if len(matches) == 0:
++#        raise exception.ImageNotFound(image=image_ident)
++#    if len(matches) > 1:
++#        msg = ("Multiple images exist with same name "
++#               "%(image_ident)s. Please use the image id "
++#               "instead.") % {'image_ident': image_ident}
++#        raise exception.Conflict(msg)
++#    return matches[0]
+
+
+ def find_images(context, image_ident, exact_match):
+diff --git a/zun/objects/container.py b/zun/objects/container.py
+index eaa9c7f..3f0fdee 100644
+--- a/zun/objects/container.py
++++ b/zun/objects/container.py
+@@ -38,7 +38,8 @@ class Container(base.ZunPersistentObject, base.ZunObject):
+     # Version 1.16: Add websocket_url and token
+     # Version 1.17: Add security_groups
+     # Version 1.18: Add auto_remove
+-    VERSION = '1.18'
++    # Version 1.19: Add image_tag
++    VERSION = '1.19'
+
+     fields = {
+         'id': fields.IntegerField(),
+@@ -68,6 +69,7 @@ class Container(base.ZunPersistentObject, base.ZunObject):
+         'status_detail': fields.StringField(nullable=True),
+         'interactive': fields.BooleanField(nullable=True),
+         'image_driver': fields.StringField(nullable=True),
++        'image_tag': fields.ListOfStringsField(nullable=True),
+         'websocket_url': fields.StringField(nullable=True),
+         'websocket_token': fields.StringField(nullable=True),
+         'security_groups': fields.ListOfStringsField(nullable=True),
+@@ -158,6 +160,7 @@ class Container(base.ZunPersistentObject, base.ZunObject):
+
+         """
+         values = self.obj_get_changes()
++        print("######### dharma object container data is values(%s).. context(%s).."%(values,context))
+         db_container = dbapi.create_container(context, values)
+         self._from_db_object(self, db_container)
+
+root@dharma:/opt/stack/zun#
